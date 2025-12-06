@@ -70,6 +70,28 @@ export const playTypewriterSound = () => {
   }
 };
 
+// Subtle "shift" tick used when rotating placeholders
+export const playShiftSound = () => {
+  try {
+    const ctx = getAudioContext();
+    const now = ctx.currentTime;
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(1400, now);
+    osc.frequency.exponentialRampToValueAtTime(900, now + 0.06);
+    gain.gain.setValueAtTime(0.05, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.08);
+  } catch (error) {
+    console.warn('Audio playback failed:', error);
+  }
+};
+
 // Enable audio context on user interaction (required by browsers)
 export const enableAudio = () => {
   try {
