@@ -8,19 +8,131 @@ function CardModel({ mousePosition, isDragging, dragVelocity }) {
   const groupRef = useRef();
   const [hovered, setHovered] = useState(false);
   const hasInitialized = useRef(false);
+  const entranceRef = useRef({ active: true, time: 0 });
+  const scanRef = useRef(null);
+  const scanSpotGroupRef = useRef(null);
+  const [scanSpotTexture, setScanSpotTexture] = useState(null);
   
   // Physics state for pendulum motion
   const velocityRef = useRef({ x: 0, y: 0 });
   const angleRef = useRef({ x: 0, y: 0 });
+  const cycleTimerRef = useRef(null);
+  const animRef = useRef({ active: false, type: 'sway', t: 0, duration: 0, amp: 0 });
+  const animIndexRef = useRef(0);
 
   // Load texture
   const profileTexture = useTexture(photoUrl);
   profileTexture.colorSpace = THREE.SRGBColorSpace;
 
+  // Clone photo texture for scan spot so we can pan/zoom its UVs
+  useEffect(() => {
+    if (profileTexture) {
+      const t = profileTexture.clone();
+      t.wrapS = THREE.ClampToEdgeWrapping;
+      t.wrapT = THREE.ClampToEdgeWrapping;
+      t.needsUpdate = true;
+      setScanSpotTexture(t);
+    }
+  }, [profileTexture]);
+  // Cycle three distinct animations every 5 seconds: sway, twist, bounce
+  useEffect(() => {
+    function startNext() {
+      if (isDragging || !groupRef.current) return;
+      const types = ['sway', 'twist', 'bounce'];
+      const type = types[animIndexRef.current % types.length];
+      animIndexRef.current += 1;
+      switch (type) {
+        case 'sway':
+          animRef.current = { active: true, type, t: 0, duration: 2.2, amp: 5.1 };
+          break;
+        case 'twist':
+          animRef.current = { active: true, type, t: 0, duration: 1.8, amp: 5.1 };
+          break;
+        case 'bounce':
+          animRef.current = { active: true, type, t: 0, duration: 2.0, amp: 5.1 };
+          break;
+        default:
+          break;
+      }
+    }
+    cycleTimerRef.current = setInterval(startNext, 5000);
+    return () => {
+      if (cycleTimerRef.current) clearInterval(cycleTimerRef.current);
+    };
+  }, [isDragging]);
+
   // Elastic/rubber band physics - card hangs from fixed point and bounces back
   useFrame((state, delta) => {
     if (groupRef.current) {
-      // Give initial gentle bounce on load
+      // Face scan band animation across the photo
+      if (scanRef.current) {
+        const scanHeight = 3.3; // matches photo height
+        const topY = -0.15 + scanHeight / 2;
+        const bottomY = -0.15 - scanHeight / 2;
+        const period = 2.6; // seconds per sweep
+        const t = (state.clock.elapsedTime % period) / period; // 0..1
+        const y = topY - t * (topY - bottomY);
+        scanRef.current.position.y = y;
+        const baseOpacity = 0.12;
+        const pulse = 0.10 * Math.abs(Math.sin(t * Math.PI * 2));
+        if (scanRef.current.material) {
+          scanRef.current.material.opacity = baseOpacity + pulse;
+        }
+      }
+
+      // Circular scan spot with magnified area
+      if (scanSpotGroupRef.current && scanSpotTexture) {
+        const W = 2.7; // photo width
+        const H = 3.3; // photo height
+        const cx = 0;  // photo center x
+        const cy = -0.15; // photo center y
+        const radiusX = W/2 - 0.4; // keep inside bounds
+        const radiusY = H/2 - 0.4;
+        const t = state.clock.elapsedTime * 0.4; // speed
+        const x = cx + Math.sin(t) * radiusX;
+        const y = cy + Math.cos(t * 0.9) * radiusY;
+        scanSpotGroupRef.current.position.x = x;
+        scanSpotGroupRef.current.position.y = y;
+
+        // UV mapping for magnified region
+        const u = (x - (cx - W/2)) / W; // normalize into [0,1]
+        const v = (y - (cy - H/2)) / H;
+        const zoom = 2.0; // magnification factor
+        const rep = 1 / zoom;
+        scanSpotTexture.repeat.set(rep, rep);
+        scanSpotTexture.offset.set(u - rep / 2, v - rep / 2);
+      }
+
+      // (magnifying glass removed)
+      // Entrance: drop from top with hanging sway, then hand over to physics
+      if (entranceRef.current.active) {
+        entranceRef.current.time += delta;
+        const t = entranceRef.current.time;
+        const restY = 0.2;
+        const initialY = 6.0;
+        const damping = 1.6; // decay rate
+        const omega = 6.0;   // oscillation frequency
+
+        const decay = Math.exp(-damping * t);
+        const offsetY = (initialY - restY) * decay * Math.cos(omega * t);
+        const swayX = 0.6 * decay * Math.sin(omega * 0.8 * t);
+
+        groupRef.current.position.x = swayX;
+        groupRef.current.position.y = restY + offsetY;
+        groupRef.current.position.z = 0;
+        groupRef.current.rotation.z = swayX * 0.18;
+        groupRef.current.rotation.x = -Math.abs(swayX) * 0.08;
+
+        if (t > 3.2) {
+          entranceRef.current.active = false;
+          // settle near rest and mark initialized
+          groupRef.current.position.set(0, restY, 0);
+          groupRef.current.rotation.set(0, 0, 0);
+          hasInitialized.current = true;
+        }
+        return; // skip normal physics during entrance
+      }
+      // Give initial gentle bounce on load (fallback, if entrance skipped)
       if (!hasInitialized.current && state.clock.elapsedTime > 0.5) {
         velocityRef.current.x = 1.5;
         velocityRef.current.y = -0.5;
@@ -67,6 +179,29 @@ function CardModel({ mousePosition, isDragging, dragVelocity }) {
         
         // Add some gravity
         const gravity = 1.5;
+
+        // Active animation overlay
+        if (animRef.current.active) {
+          const a = animRef.current;
+          a.t += delta;
+          const decay = Math.exp(-1.2 * a.t);
+          if (a.type === 'sway') {
+            const s = Math.sin(a.t * 4.2) * a.amp * decay;
+            velocityRef.current.x += s * 0.9 * delta * 10;
+            groupRef.current.rotation.z += s * 0.05 * delta * 10;
+          } else if (a.type === 'twist') {
+            const s = Math.sin(a.t * 5.0) * a.amp * decay;
+            groupRef.current.rotation.y += s * 0.09 * delta * 10;
+            groupRef.current.rotation.x += -Math.abs(s) * 0.035 * delta * 10;
+            velocityRef.current.z += s * 0.35 * delta * 10;
+          } else if (a.type === 'bounce') {
+            const s = Math.sin(a.t * 5.0) * a.amp * decay;
+            velocityRef.current.y += Math.abs(s) * 1.2 * delta * 16;
+          }
+          if (a.t > a.duration) {
+            a.active = false;
+          }
+        }
         
         // Update velocity with spring forces
         velocityRef.current.x += springForceX * delta * 10;
@@ -230,6 +365,59 @@ function CardModel({ mousePosition, isDragging, dragVelocity }) {
           toneMapped={false}
         />
       </mesh>
+
+      {/* Light green filter overlay on photo */}
+      <mesh position={[0, -0.15, 0.051]}>
+        <planeGeometry args={[2.7, 3.3]} />
+        <meshBasicMaterial 
+          color="#00ff66"
+          transparent
+          opacity={0.08}
+          blending={THREE.AdditiveBlending}
+        />
+      </mesh>
+
+      {/* Face scan line overlay (animated in useFrame) */}
+      <mesh ref={scanRef} position={[0, 0, 0.052]}>
+        <planeGeometry args={[2.7, 0.12]} />
+        <meshBasicMaterial 
+          color="#00ff66"
+          transparent
+          opacity={0.18}
+          blending={THREE.AdditiveBlending}
+        />
+      </mesh>
+
+      {/* Circular scan spot with magnified texture */}
+      {scanSpotTexture && (
+        <group ref={scanSpotGroupRef} position={[0, -0.15, 0.053]}>
+          {/* main lens area using photo texture (zoomed via UVs) */}
+          <mesh>
+            <circleGeometry args={[0.5, 48]} />
+            <meshBasicMaterial map={scanSpotTexture} color="#b6ffd6" transparent opacity={0.95} />
+          </mesh>
+          {/* edge glow */}
+          <mesh position={[0, 0, -0.001]}>
+            <ringGeometry args={[0.5, 0.62, 48]} />
+            <meshBasicMaterial color="#00ff66" transparent opacity={0.18} blending={THREE.AdditiveBlending} />
+          </mesh>
+          {/* crosshair */}
+          <mesh position={[0, 0, 0.001]}>
+            <ringGeometry args={[0.06, 0.07, 32]} />
+            <meshBasicMaterial color="#00ff66" transparent opacity={0.4} blending={THREE.AdditiveBlending} />
+          </mesh>
+          <mesh position={[0, 0, 0.001]}>
+            <planeGeometry args={[0.02, 0.6]} />
+            <meshBasicMaterial color="#00ff66" transparent opacity={0.25} blending={THREE.AdditiveBlending} />
+          </mesh>
+          <mesh position={[0, 0, 0.001]} rotation={[0,0,Math.PI/2]}>
+            <planeGeometry args={[0.02, 0.6]} />
+            <meshBasicMaterial color="#00ff66" transparent opacity={0.25} blending={THREE.AdditiveBlending} />
+          </mesh>
+        </group>
+      )}
+
+      {/* (magnifying glass removed) */}
 
       {/* Hole at top of card where lanyard connects - positioned higher */}
       <mesh position={[0, 2.15, 0.045]} rotation={[Math.PI / 2, 0, 0]}>
