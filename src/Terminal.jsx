@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import TypingText from './TypingText';
-import { playKeySound, enableAudio } from './utils/keyboardSound';
+import { playKeySound, enableAudio, playShiftSound } from './utils/keyboardSound';
 
 const PROMPT = 'ranjan@portfolio:~$';
 
@@ -26,11 +26,6 @@ const WELCOME_MESSAGE = `${ASCII_BANNER}
 
 Welcome to my interactive AI-powered portfolio terminal!
 Type 'help' to see available commands or try 'about' to learn more about me.
-
-💡 Pro Tips:
-  • Use TAB for command autocompletion
-  • Use ↑/↓ arrow keys to navigate command history
-  • Type 'social' to connect with me on social media
 `;
 
 export default function Terminal() {
@@ -40,8 +35,13 @@ export default function Terminal() {
   const [input, setInput] = useState('');
   const [commandHistory, setCommandHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
+  const [interruptToken, setInterruptToken] = useState(0);
   const inputRef = useRef(null);
   const containerRef = useRef(null);
+  const bottomRef = useRef(null);
+  const [placeholder, setPlaceholder] = useState('Type a command...');
+  const placeholderItems = ['skills', 'resume', 'experience', 'projects', 'about', 'social', 'help'];
+  const placeholderIndex = useRef(0);
 
   useEffect(() => {
     // focus
@@ -56,16 +56,68 @@ export default function Terminal() {
   }, []);
 
   useEffect(() => {
-    // auto-scroll
-    containerRef.current?.scrollTo({ top: containerRef.current.scrollHeight, behavior: 'smooth' });
+    const interval = setInterval(() => {
+      placeholderIndex.current = (placeholderIndex.current + 1) % placeholderItems.length;
+      setPlaceholder(`Try "${placeholderItems[placeholderIndex.current]}"`);
+      // playShiftSound();
+    }, 500);
+    return () => clearInterval(interval);
+  }, []);
+
+  // helper: scroll to bottom if user is near the bottom already
+  const scrollToBottom = (smooth = false) => {
+    const el = containerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+    if (distanceFromBottom < 120) {
+      bottomRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
+    }
+  };
+
+  useEffect(() => {
+    // auto-scroll when new history lines are added
+    scrollToBottom(true);
   }, [history]);
+
+  useEffect(() => {
+    const onTypingTick = () => scrollToBottom(false);
+    window.addEventListener('terminal-typing-tick', onTypingTick);
+    return () => window.removeEventListener('terminal-typing-tick', onTypingTick);
+  }, []);
 
 //   function appendOutput(text, animated = true) {
 //     setHistory(h => [...h, { type: 'output', content: text, animated }]);
 //   }
 
   function appendOutput(content, animated = true) {
-    setHistory(h => [...h, { type: 'output', content, animated }]);
+    const THINK_MS = 1000;
+    // Show temporary thinking indicator then output
+    setHistory(h => [...h, { type: 'thinking' }]);
+    setTimeout(() => {
+      setHistory(h => {
+        const newHistory = [...h];
+        for (let i = newHistory.length - 1; i >= 0; i--) {
+          if (newHistory[i] && newHistory[i].type === 'thinking') {
+            newHistory.splice(i, 1);
+            break;
+          }
+        }
+        newHistory.push({ type: 'output', content, animated });
+        return newHistory;
+      });
+    }, THINK_MS);
+  }
+
+  function ThinkingDots() {
+    const [count, setCount] = useState(1);
+    useEffect(() => {
+      const id = setInterval(() => {
+        setCount(c => (c % 3) + 1);
+        try { window.dispatchEvent(new Event('terminal-typing-tick')); } catch {}
+      }, 300);
+      return () => clearInterval(id);
+    }, []);
+    return <span className="thinking-dots">{'.'.repeat(count)}</span>;
   }
 
   function appendError(text) {
@@ -300,6 +352,14 @@ Phone      → +91 6200577604
   }
 
   function handleKeyDown(e) {
+    // Interrupt animation with Ctrl+C or Ctrl+X
+    const keyLower = (e.key || '').toLowerCase();
+    if ((e.ctrlKey || e.metaKey) && (keyLower === 'c' || keyLower === 'x')) {
+      e.preventDefault();
+      setInterruptToken(t => t + 1);
+      setHistory(h => [...h, { type: 'output', content: keyLower === 'c' ? '^C' : '^X', animated: false }]);
+      return;
+    }
     if (e.key === 'Enter') {
       e.preventDefault();
       runCommand();
@@ -356,6 +416,10 @@ Phone      → +91 6200577604
                 <span className="cmd">{line.content}</span>
               </div>
             );
+          } else if (line.type === 'thinking') {
+            return (
+              <pre className="output thinking" key={idx}><ThinkingDots /></pre>
+            );
           } else {
             // output text may have newlines
             const outputClass = line.type === 'error' ? 'output error' : 'output';
@@ -363,7 +427,7 @@ Phone      → +91 6200577604
                 <pre className={outputClass} key={idx}>
                 {typeof line.content === "string" ? (
                   line.animated ? (
-                    <TypingText text={line.content} speed={15} />
+                    <TypingText text={line.content} speed={15} interruptKey={interruptToken} />
                   ) : (
                     line.content
                   )
@@ -392,10 +456,12 @@ Phone      → +91 6200577604
             autoComplete="off"
             autoCapitalize="off"
             autoCorrect="off"
+            placeholder={placeholder}
             aria-label="Terminal command input"
           />
           <span className="cursor" aria-hidden="true" />
         </div>
+        <div ref={bottomRef} />
       </div>
     </div>
   );
